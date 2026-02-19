@@ -3,7 +3,7 @@
 import random
 from datetime import date, time as dt_time
 
-from rich.console import Console
+from simulation.console import sim_console as console
 
 from config import (
     WALK_IN_MIN, WALK_IN_MAX,
@@ -16,7 +16,6 @@ from models.company_models import CRMRecord, EMSEmployee, EMSCalendar
 from simulation.llm import create_note, reset_worker_call_count
 from workers.base import BaseWorker
 
-console = Console()
 SIM_CUSTOMER_DB = "sim_customers.db"
 CRM_DB = "crm.db"
 EMS_DB = "ems.db"

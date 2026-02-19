@@ -1,19 +1,18 @@
 """Day loop: scheduling logic and step mode."""
 
 import random
+from contextlib import nullcontext
 from datetime import date, timedelta
 from typing import List
 
-from rich.console import Console
 from rich.panel import Panel
 
 from config import (
     LEAD_CREATION_INTERVAL, SALES_FOLLOWUP_INTERVAL, NEW_CARS_INTERVAL,
 )
+from simulation.console import sim_console as console
 from simulation.state import write_state
 from workers import get_worker_instances, WORKER_NAMES
-
-console = Console()
 
 
 def _should_run(worker_name: str, sim_date: date, start_date: date, day_number: int) -> bool:
@@ -53,58 +52,41 @@ def run_loop(
 ) -> None:
     """Main simulation day loop."""
     from reporting.reporter import Reporter
+    from simulation.dashboard import LiveDashboard
+
     reporter = Reporter(start_date=start_date, end_date=end_date)
 
     workers = get_worker_instances(enabled_workers)
     total_days = (end_date - start_date).days
     current_date = start_date
 
+    cumulative_stats: dict = {
+        "cars_sold": 0,
+        "cars_acquired": 0,
+        "new_leads": 0,
+        "leads_processed": 0,
+        "cash_deals": 0,
+        "loans": 0,
+        "total_employees": 0,
+        "total_revenue": 0.0,
+        "total_car_costs": 0.0,
+        "total_salaries": 0.0,
+    }
+
+    ctx = LiveDashboard(total_days, start_date) if dashboard else nullcontext()
+
     day_number = 0
-    while current_date < end_date:
-        day_number += 1
-        weekday_name = current_date.strftime("%A")
+    with ctx:
+        while current_date < end_date:
+            day_number += 1
+            weekday_name = current_date.strftime("%A")
 
-        console.print(Panel(
-            f"[bold]Day {day_number} | {current_date} ({weekday_name})[/bold]",
-            style="bold blue",
-        ))
+            if not dashboard:
+                console.print(Panel(
+                    f"[bold]Day {day_number} | {current_date} ({weekday_name})[/bold]",
+                    style="bold blue",
+                ))
 
-        write_state(
-            status="running",
-            current_date=current_date,
-            start_date=start_date,
-            end_date=end_date,
-            day_number=day_number,
-            total_days=total_days,
-            last_completed_worker=None,
-            workers_enabled=enabled_workers,
-            workers_disabled=disabled_workers,
-        )
-
-        daily_stats: dict = {
-            "cars_sold": 0,
-            "new_leads": 0,
-            "leads_processed": 0,
-            "cash_deals": 0,
-            "loans": 0,
-            "total_employees": 0,
-            "total_revenue": 0.0,
-            "total_car_costs": 0.0,
-            "total_salaries": 0.0,
-        }
-
-        last_worker = None
-        for worker in workers:
-            if not _should_run(worker.name, current_date, start_date, day_number):
-                continue
-
-            result = worker.run(sim_date=current_date, rng=rng)
-            if result:
-                for k, v in result.items():
-                    if k in daily_stats:
-                        daily_stats[k] = daily_stats[k] + v
-
-            last_worker = worker.name
             write_state(
                 status="running",
                 current_date=current_date,
@@ -112,42 +94,94 @@ def run_loop(
                 end_date=end_date,
                 day_number=day_number,
                 total_days=total_days,
-                last_completed_worker=last_worker,
+                last_completed_worker=None,
                 workers_enabled=enabled_workers,
                 workers_disabled=disabled_workers,
             )
 
-        reporter.record_day(current_date, daily_stats)
+            daily_stats: dict = {
+                "cars_sold": 0,
+                "cars_acquired": 0,
+                "new_leads": 0,
+                "leads_processed": 0,
+                "cash_deals": 0,
+                "loans": 0,
+                "total_employees": 0,
+                "total_revenue": 0.0,
+                "total_car_costs": 0.0,
+                "total_salaries": 0.0,
+            }
 
-        if step_mode:
-            write_state(
-                status="paused",
-                current_date=current_date,
-                start_date=start_date,
-                end_date=end_date,
-                day_number=day_number,
-                total_days=total_days,
-                last_completed_worker=last_worker,
-                workers_enabled=enabled_workers,
-                workers_disabled=disabled_workers,
-            )
-            try:
-                input("\n[step-mode] Press [Enter] to advance to next day...")
-            except EOFError:
-                pass
-            write_state(
-                status="running",
-                current_date=current_date,
-                start_date=start_date,
-                end_date=end_date,
-                day_number=day_number,
-                total_days=total_days,
-                last_completed_worker=last_worker,
-                workers_enabled=enabled_workers,
-                workers_disabled=disabled_workers,
-            )
+            last_worker = None
+            for worker in workers:
+                if not _should_run(worker.name, current_date, start_date, day_number):
+                    continue
 
-        current_date += timedelta(days=1)
+                if dashboard:
+                    ctx.set_current_worker(worker.name)
+
+                result = worker.run(sim_date=current_date, rng=rng)
+                if result:
+                    for k, v in result.items():
+                        if k in daily_stats:
+                            daily_stats[k] = daily_stats[k] + v
+
+                last_worker = worker.name
+
+                if dashboard:
+                    ctx.set_last_worker(worker.name)
+
+                write_state(
+                    status="running",
+                    current_date=current_date,
+                    start_date=start_date,
+                    end_date=end_date,
+                    day_number=day_number,
+                    total_days=total_days,
+                    last_completed_worker=last_worker,
+                    workers_enabled=enabled_workers,
+                    workers_disabled=disabled_workers,
+                )
+
+            # Accumulate into cumulative stats
+            for k in cumulative_stats:
+                if k in daily_stats:
+                    cumulative_stats[k] = cumulative_stats[k] + daily_stats[k]
+
+            if dashboard:
+                ctx.update(day_number, current_date, daily_stats, cumulative_stats)
+
+            reporter.record_day(current_date, daily_stats)
+
+            if step_mode:
+                write_state(
+                    status="paused",
+                    current_date=current_date,
+                    start_date=start_date,
+                    end_date=end_date,
+                    day_number=day_number,
+                    total_days=total_days,
+                    last_completed_worker=last_worker,
+                    workers_enabled=enabled_workers,
+                    workers_disabled=disabled_workers,
+                )
+                try:
+                    input("\n[step-mode] Press [Enter] to advance to next day...")
+                except EOFError:
+                    pass
+                write_state(
+                    status="running",
+                    current_date=current_date,
+                    start_date=start_date,
+                    end_date=end_date,
+                    day_number=day_number,
+                    total_days=total_days,
+                    last_completed_worker=last_worker,
+                    workers_enabled=enabled_workers,
+                    workers_disabled=disabled_workers,
+                )
+
+            current_date += timedelta(days=1)
 
     # Simulation complete
     write_state(

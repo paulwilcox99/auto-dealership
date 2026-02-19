@@ -3,7 +3,7 @@
 import random
 from datetime import date
 
-from rich.console import Console
+from simulation.console import sim_console as console
 
 from config import (
     SALES_NO_SHOW_RATE, SALES_IN_NEGOTIATION_RATE, SALES_NO_SALE_RATE,
@@ -15,7 +15,6 @@ from models.company_models import CRMRecord, DMSCar
 from simulation.llm import create_note, reset_worker_call_count
 from workers.base import BaseWorker
 
-console = Console()
 CRM_DB = "crm.db"
 DMS_DB = "dms.db"
 

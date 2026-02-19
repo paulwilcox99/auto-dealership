@@ -3,7 +3,7 @@
 import random
 from datetime import date, timedelta
 
-from rich.console import Console
+from simulation.console import sim_console as console
 
 from config import (
     FOLLOWUP_RESCHEDULE_RATE, FOLLOWUP_DROP_RATE,
@@ -15,7 +15,6 @@ from models.company_models import CRMRecord, LMSLead
 from simulation.llm import create_note, reset_worker_call_count
 from workers.base import BaseWorker
 
-console = Console()
 CRM_DB = "crm.db"
 LMS_DB = "lms.db"
 EMS_DB = "ems.db"

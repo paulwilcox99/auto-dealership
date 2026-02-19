@@ -3,7 +3,7 @@
 import random
 from datetime import date
 
-from rich.console import Console
+from simulation.console import sim_console as console
 
 from config import (
     LEAD_CREATION_BATCH_MIN, LEAD_CREATION_BATCH_MAX,
@@ -14,8 +14,6 @@ from models.sim_models import SimCustomer
 from models.company_models import LMSLead
 from simulation.events import log_event
 from workers.base import BaseWorker
-
-console = Console()
 
 SIM_CUSTOMER_DB = "sim_customers.db"
 LMS_DB = "lms.db"

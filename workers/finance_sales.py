@@ -4,7 +4,7 @@ import random
 from datetime import date
 from decimal import Decimal
 
-from rich.console import Console
+from simulation.console import sim_console as console
 
 from config import (
     FINANCE_LOAN_RATE,
@@ -23,7 +23,6 @@ from simulation.llm import create_note, reset_worker_call_count
 from simulation.events import log_event
 from workers.base import BaseWorker
 
-console = Console()
 CRM_DB = "crm.db"
 DMS_DB = "dms.db"
 ERP_DB = "erp.db"

@@ -4,7 +4,7 @@ import random
 from datetime import date
 from decimal import Decimal
 
-from rich.console import Console
+from simulation.console import sim_console as console
 
 from config import ERP_DEBIT
 from database.session import session_for
@@ -12,7 +12,6 @@ from models.company_models import ERPEmployee, ERPTransaction
 from simulation.events import log_event
 from workers.base import BaseWorker
 
-console = Console()
 ERP_DB = "erp.db"
 
 

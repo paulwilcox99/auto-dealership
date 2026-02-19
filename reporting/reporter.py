@@ -31,6 +31,7 @@ class Reporter:
         result = SimResult(
             sim_date=sim_date,
             cars_sold=stats.get("cars_sold", 0),
+            cars_acquired=stats.get("cars_acquired", 0),
             new_leads=stats.get("new_leads", 0),
             leads_processed=stats.get("leads_processed", 0),
             cash_deals=stats.get("cash_deals", 0),
@@ -53,6 +54,7 @@ class Reporter:
 
         # Aggregate
         total_sold = sum(d.get("cars_sold", 0) for d in self.daily_records)
+        total_acquired = sum(d.get("cars_acquired", 0) for d in self.daily_records)
         total_cash = sum(d.get("cash_deals", 0) for d in self.daily_records)
         total_loans = sum(d.get("loans", 0) for d in self.daily_records)
         total_leads = sum(d.get("new_leads", 0) for d in self.daily_records)
@@ -99,6 +101,7 @@ class Reporter:
             "",
             f"SALES",
             f"  Total cars sold:        {total_sold}",
+            f"  Cars acquired:          {total_acquired}",
             f"  Cash deals:             {total_cash}",
             f"  Loan deals:             {total_loans}",
             f"  Total revenue:          ${total_revenue:,.2f}",

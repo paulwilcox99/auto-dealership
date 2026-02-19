@@ -67,6 +67,7 @@ class SimResult(SimBase):
     id = Column(Integer, primary_key=True, autoincrement=True)
     sim_date = Column(Date, nullable=False)
     cars_sold = Column(Integer, default=0)
+    cars_acquired = Column(Integer, default=0)
     new_leads = Column(Integer, default=0)
     leads_processed = Column(Integer, default=0)
     cash_deals = Column(Integer, default=0)

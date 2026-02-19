@@ -4,14 +4,13 @@ import random
 from datetime import date
 from decimal import Decimal
 
-from rich.console import Console
+from simulation.console import sim_console as console
 
 from config import ERP_CREDIT
 from database.session import session_for
 from models.company_models import LSSLoan, ERPTransaction
 from workers.base import BaseWorker
 
-console = Console()
 LSS_DB = "lss.db"
 ERP_DB = "erp.db"
 

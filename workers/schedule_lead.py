@@ -3,7 +3,7 @@
 import random
 from datetime import date, timedelta, time as dt_time
 
-from rich.console import Console
+from simulation.console import sim_console as console
 
 from config import (
     LEAD_SCHEDULE_RATE,
@@ -14,7 +14,6 @@ from models.company_models import LMSLead, EMSEmployee, EMSCalendar
 from simulation.llm import create_note, reset_worker_call_count
 from workers.base import BaseWorker
 
-console = Console()
 LMS_DB = "lms.db"
 EMS_DB = "ems.db"
 
