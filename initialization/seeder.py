@@ -25,12 +25,14 @@ from config import (
     EMP_AVAILABLE, EMP_USED,
     CUST_AVAILABLE,
     DMS_AVAILABLE,
+    ERP_SAVINGS_MIN, ERP_SAVINGS_MAX,
+    ERP_DEBT_MIN, ERP_DEBT_MAX,
 )
 from database.session import engine_for, session_for
 from models.sim_models import SimBase, SimCustomer, SimEmployee, SimCar, SimResult, EventLog
 from models.company_models import (
     CompanyBase, LMSLead, CRMRecord, DMSCar,
-    ERPEmployee, ERPTransaction, LSSLoan, EMSEmployee, EMSCalendar,
+    ERPEmployee, ERPTransaction, ERPBalance, LSSLoan, EMSEmployee, EMSCalendar,
 )
 from data.cars_data import MAKES_MODELS, get_all_combinations
 from simulation.state import write_state
@@ -40,7 +42,7 @@ console = Console()
 # ── DB filename constants ─────────────────────────────────────────────────────
 SIM_CUSTOMER_DB = "sim_customers.db"
 SIM_EMPLOYEE_DB = "sim_employees.db"
-SIM_CAR_DB = "sim_cars.db"
+SIM_CAR_DB = "cars_available.db"
 SIM_RESULT_DB = "sim_results.db"
 EVENTS_DB = "events.db"
 LMS_DB = "lms.db"
@@ -90,7 +92,7 @@ def _drop_and_create_all(rng: random.Random) -> None:
         LMS_DB: [LMSLead.__table__],
         CRM_DB: [CRMRecord.__table__],
         DMS_DB: [DMSCar.__table__],
-        ERP_DB: [ERPEmployee.__table__, ERPTransaction.__table__],
+        ERP_DB: [ERPEmployee.__table__, ERPTransaction.__table__, ERPBalance.__table__],
         LSS_DB: [LSSLoan.__table__],
         EMS_DB: [EMSEmployee.__table__, EMSCalendar.__table__],
     }
@@ -243,6 +245,17 @@ def _setup_inventory(rng: random.Random) -> int:
     return len(chosen)
 
 
+def _seed_erp_balance(rng: random.Random) -> tuple[float, float]:
+    """Insert the single-row opening balance into erp_balance."""
+    cash = round(rng.uniform(ERP_SAVINGS_MIN, ERP_SAVINGS_MAX), 2)
+    debt = round(rng.uniform(ERP_DEBT_MIN,    ERP_DEBT_MAX),    2)
+    session = session_for(ERP_DB)
+    session.add(ERPBalance(cash=cash, debt=debt))
+    session.commit()
+    session.close()
+    return cash, debt
+
+
 def run_seeder(rng: random.Random, start_date: date, end_date: date, args=None) -> None:
     """Full initialization sequence."""
     fake = Faker()
@@ -257,6 +270,7 @@ def run_seeder(rng: random.Random, start_date: date, end_date: date, args=None) 
     n_cars = _seed_cars(rng)
     staff_counts = _setup_staff(rng)
     n_inventory = _setup_inventory(rng)
+    opening_cash, opening_debt = _seed_erp_balance(rng)
 
     # Write initial state file
     write_state(
@@ -282,6 +296,8 @@ def run_seeder(rng: random.Random, start_date: date, end_date: date, args=None) 
     table.add_row("Sales staff assigned", str(staff_counts["sales"]))
     table.add_row("Finance staff assigned", str(staff_counts["finance"]))
     table.add_row("Initial DMS inventory", str(n_inventory))
+    table.add_row("Opening cash",  f"${opening_cash:,.2f}")
+    table.add_row("Opening debt",  f"${opening_debt:,.2f}")
     table.add_row("Databases created", str(len(ALL_DBS)))
     console.print(table)
     console.print("[bold green]Initialization complete.[/bold green]\n")

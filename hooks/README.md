@@ -148,7 +148,7 @@ All files live in `DB_DIR` (default `./data`):
 |---|---|
 | `sim_customers.db` | Customer pool |
 | `sim_employees.db` | Employee pool |
-| `sim_cars.db` | Car pool |
+| `cars_available.db` | Car pool |
 | `sim_results.db` | Daily snapshots |
 | `events.db` | Append-only event log |
 | `lms.db` | Lead Management System |

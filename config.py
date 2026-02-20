@@ -75,6 +75,12 @@ FOLLOWUP_DROP_RATE = 0.20        # met/no_sale → drop (not_interested)
 NEW_CARS_BATCH_MIN = 5
 NEW_CARS_BATCH_MAX = 15
 
+# ── Starting balance sheet ────────────────────────────────────────────────────
+ERP_SAVINGS_MIN = 1_000_000
+ERP_SAVINGS_MAX = 20_000_000
+ERP_DEBT_MIN    = 100_000
+ERP_DEBT_MAX    = 5_000_000
+
 # ── Salary / payday ───────────────────────────────────────────────────────────
 EMPLOYEE_SALARY_MIN = 2_000
 EMPLOYEE_SALARY_MAX = 20_000

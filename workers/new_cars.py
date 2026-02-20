@@ -16,7 +16,7 @@ from models.sim_models import SimCar
 from models.company_models import DMSCar, ERPTransaction
 from workers.base import BaseWorker
 
-SIM_CAR_DB = "sim_cars.db"
+SIM_CAR_DB = "cars_available.db"
 DMS_DB = "dms.db"
 ERP_DB = "erp.db"
 

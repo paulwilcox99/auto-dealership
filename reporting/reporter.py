@@ -12,6 +12,7 @@ from rich.panel import Panel
 from config import DB_DIR
 from database.session import session_for
 from models.sim_models import SimResult
+from models.company_models import ERPBalance, ERPTransaction
 
 console = Console()
 SIM_RESULT_DB = "sim_results.db"
@@ -26,7 +27,7 @@ class Reporter:
         self.daily_records: List[dict] = []
 
     def record_day(self, sim_date: date, stats: dict) -> None:
-        """Persist a daily snapshot to sim_results.db."""
+        """Persist a daily snapshot to sim_results.db and update ERP balance."""
         session = session_for(SIM_RESULT_DB)
         result = SimResult(
             sim_date=sim_date,
@@ -45,6 +46,31 @@ class Reporter:
         session.commit()
         session.close()
         self.daily_records.append({"date": sim_date, **stats})
+        self._update_erp_balance(sim_date)
+
+    def _update_erp_balance(self, sim_date: date) -> None:
+        """Apply today's net ERP transactions to the running cash balance."""
+        try:
+            erp_session = session_for("erp.db")
+            txns = (
+                erp_session.query(ERPTransaction)
+                .filter(ERPTransaction.transaction_date == sim_date)
+                .all()
+            )
+            net = Decimal("0")
+            for t in txns:
+                if t.transaction_type == "credit":
+                    net += Decimal(str(t.amount))
+                else:
+                    net -= Decimal(str(t.amount))
+
+            balance = erp_session.query(ERPBalance).first()
+            if balance:
+                balance.cash = Decimal(str(balance.cash)) + net
+                erp_session.commit()
+            erp_session.close()
+        except Exception:
+            pass
 
     def print_final_report(self) -> None:
         """Print and save the end-of-simulation summary."""
@@ -54,13 +80,30 @@ class Reporter:
 
         # Aggregate
         total_sold = sum(d.get("cars_sold", 0) for d in self.daily_records)
-        total_acquired = sum(d.get("cars_acquired", 0) for d in self.daily_records)
         total_cash = sum(d.get("cash_deals", 0) for d in self.daily_records)
         total_loans = sum(d.get("loans", 0) for d in self.daily_records)
         total_leads = sum(d.get("new_leads", 0) for d in self.daily_records)
         total_revenue = sum(d.get("total_revenue", 0) for d in self.daily_records)
         total_salaries = sum(d.get("total_salaries", 0) for d in self.daily_records)
-        total_car_costs = sum(d.get("total_car_costs", 0) for d in self.daily_records)
+
+        # Read car acquisition totals from ERP so agent purchases are included
+        # even when the new_cars worker is disabled.
+        total_acquired = 0
+        total_car_costs = 0.0
+        try:
+            from models.company_models import ERPTransaction
+            erp_session = session_for("erp.db")
+            acquisitions = (
+                erp_session.query(ERPTransaction)
+                .filter_by(transaction_type="debit", payee_payer="Vehicle Acquisition")
+                .all()
+            )
+            total_acquired = len(acquisitions)
+            total_car_costs = sum(float(t.amount) for t in acquisitions)
+            erp_session.close()
+        except Exception:
+            total_acquired = sum(d.get("cars_acquired", 0) for d in self.daily_records)
+            total_car_costs = sum(d.get("total_car_costs", 0) for d in self.daily_records)
         days = len(self.daily_records)
 
         net_profit = total_revenue - total_salaries - total_car_costs
@@ -76,6 +119,28 @@ class Reporter:
                 remaining = float(loan.payments_left or 0) * float(loan.payment_amount or 0)
                 loan_portfolio += remaining
             lss_session.close()
+        except Exception:
+            pass
+
+        # Get current balance sheet from ERP and DMS
+        current_cash = 0.0
+        current_debt = 0.0
+        inventory_value = 0.0
+        try:
+            erp_bal_session = session_for("erp.db")
+            balance = erp_bal_session.query(ERPBalance).first()
+            if balance:
+                current_cash = float(balance.cash)
+                current_debt = float(balance.debt)
+            erp_bal_session.close()
+        except Exception:
+            pass
+        try:
+            from models.company_models import DMSCar as _DMSCar
+            dms_inv_session = session_for("dms.db")
+            available_cars = dms_inv_session.query(_DMSCar).filter_by(status="available").all()
+            inventory_value = sum(float(c.min_price or 0) for c in available_cars)
+            dms_inv_session.close()
         except Exception:
             pass
 
@@ -114,6 +179,13 @@ class Reporter:
             f"  Total car costs:        ${total_car_costs:,.2f}",
             f"  Net profit estimate:    ${net_profit:,.2f}",
             f"  Active loan portfolio:  ${loan_portfolio:,.2f}",
+            "",
+            f"BALANCE SHEET",
+            f"  Cash:                   ${current_cash:,.2f}",
+            f"  Inventory value:        ${inventory_value:,.2f}",
+            f"  Total assets:           ${current_cash + inventory_value:,.2f}",
+            f"  Outstanding debt:       ${current_debt:,.2f}",
+            f"  Net equity:             ${current_cash + inventory_value - current_debt:,.2f}",
             "",
             f"DAILY AVERAGES",
             f"  Cars sold/day:          {total_sold/days:.2f}",

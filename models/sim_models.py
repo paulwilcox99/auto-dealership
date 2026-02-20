@@ -42,7 +42,7 @@ class SimEmployee(SimBase):
     status = Column(String, nullable=False, default="available")
 
 
-# ── sim_cars.db ───────────────────────────────────────────────────────────────
+# ── cars_available.db ─────────────────────────────────────────────────────────
 
 class SimCar(SimBase):
     __tablename__ = "sim_cars"

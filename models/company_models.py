@@ -115,6 +115,15 @@ class ERPTransaction(CompanyBase):
     transaction_date = Column(Date, nullable=False)
 
 
+class ERPBalance(CompanyBase):
+    """Single-row table that tracks the dealership's cash position and debt."""
+    __tablename__ = "erp_balance"
+
+    id   = Column(Integer, primary_key=True, autoincrement=True)
+    cash = Column(Numeric(14, 2), nullable=False, default=0)
+    debt = Column(Numeric(14, 2), nullable=False, default=0)
+
+
 # ── lss.db ────────────────────────────────────────────────────────────────────
 
 class LSSLoan(CompanyBase):

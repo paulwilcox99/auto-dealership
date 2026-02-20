@@ -1,8 +1,14 @@
 # Main Street Motors — Agent Developer Guide
 
-This guide is for developers building AI agents that run alongside the dealership
-simulation in a parallel process. It covers the full database schema, simulation
-lifecycle, and the two patterns for keeping an agent in sync with the sim.
+This guide is for developers building AI agents that interact with the Main Street Motors
+dealership databases. Agents connect to the business databases directly, poll a single
+JSON file to know when a new business day has started, and then read and write the
+databases as they would in a live dealership environment.
+
+**Agents do not need to know anything about the simulation.** From your agent's
+perspective, the databases are live dealership systems. The only simulation artifact
+your agent touches is `simulation_state.json`, which serves as a lightweight clock
+signal telling the agent that a new day's data is ready.
 
 ---
 
@@ -10,19 +16,19 @@ lifecycle, and the two patterns for keeping an agent in sync with the sim.
 
 1. [Architecture Overview](#architecture-overview)
 2. [Database Reference](#database-reference)
-   - [Simulation Databases](#simulation-databases)
-   - [Company Databases](#company-databases)
-3. [Simulation State File](#simulation-state-file)
-4. [Event Log](#event-log)
-5. [Worker Schedule](#worker-schedule)
-6. [Day Lifecycle](#day-lifecycle)
-7. [Synchronization Patterns](#synchronization-patterns)
-   - [Free-Running Mode](#free-running-mode)
-   - [Step-by-Step Mode](#step-by-step-mode)
-8. [Reading from Databases Safely](#reading-from-databases-safely)
-9. [Writing Back to Databases](#writing-back-to-databases)
-10. [Configuration Reference](#configuration-reference)
-11. [Status Enums Quick Reference](#status-enums-quick-reference)
+   - [`cars_available.db`](#cars_availabledb)
+   - [`lms.db`](#lmsdb--lead-management-system)
+   - [`crm.db`](#crmdb--customer-relationship-management)
+   - [`dms.db`](#dmsdb--dealer-management-system)
+   - [`erp.db`](#erpdb--enterprise-resource-planning)
+   - [`lss.db`](#lssdb--loan-servicing-system)
+   - [`ems.db`](#emsdb--employee-management-system)
+3. [How Agents Are Triggered](#how-agents-are-triggered)
+4. [Polling Pattern](#polling-pattern)
+5. [Reading from Databases](#reading-from-databases)
+6. [Writing Back to Databases](#writing-back-to-databases)
+7. [Status Enums Quick Reference](#status-enums-quick-reference)
+8. [Common Agent Recipes](#common-agent-recipes)
 
 ---
 
@@ -30,763 +36,445 @@ lifecycle, and the two patterns for keeping an agent in sync with the sim.
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│  main.py  (simulation process)                       │
+│  data/  (shared directory)                           │
 │                                                      │
-│  simulation/loop.py                                  │
-│    └── workers run in order each day                 │
-│        ├── reads/writes 11 SQLite DBs                │
-│        └── writes simulation_state.json after        │
-│            every worker                              │
-└──────────────┬──────────────────────────────────────┘
-               │  shared filesystem
-┌──────────────▼──────────────────────────────────────┐
-│  data/                                               │
-│    ├── simulation_state.json  ← sync point           │
-│    ├── events.db              ← append-only log      │
-│    ├── lms.db   crm.db  dms.db                       │
-│    ├── erp.db   lss.db  ems.db                       │
-│    └── sim_customers.db  sim_employees.db            │
-│        sim_cars.db  sim_results.db                   │
-└──────────────┬──────────────────────────────────────┘
-               │  shared filesystem
-┌──────────────▼──────────────────────────────────────┐
+│  ── Clock signal ──────────────────────────────────  │
+│    simulation_state.json   ← agent polls this        │
+│                                                      │
+│  ── Business databases (agent reads & writes) ─────  │
+│    cars_available.db                                 │
+│    lms.db    crm.db    dms.db                        │
+│    erp.db    lss.db    ems.db                        │
+│                                                      │
+│  ── Off-limits to agents ──────────────────────────  │
+│    sim_customers.db   sim_employees.db               │
+│    sim_results.db     events.db                      │
+└──────────────────────┬──────────────────────────────┘
+                       │
+┌──────────────────────▼──────────────────────────────┐
 │  Your agent process                                   │
-│    ├── polls simulation_state.json                   │
-│    ├── reads events.db for what happened             │
-│    ├── queries company DBs for details               │
-│    └── writes decisions back to company DBs          │
+│    1. Poll simulation_state.json every few seconds   │
+│    2. When current_date changes → run agent logic    │
+│    3. Query the 7 business databases                 │
+│    4. Write decisions back to those databases        │
 └─────────────────────────────────────────────────────┘
 ```
 
-All 11 SQLite databases are opened in **WAL mode** (Write-Ahead Logging), which
-allows your agent to read any database while the simulation is writing to it
-without blocking or corrupting data.
+All databases use **WAL mode** (Write-Ahead Logging), so your agent can read at any
+time without blocking writes or corrupting data.
 
-The simulation's location for all files is `./data/` by default. Override with
-the `DB_DIR` environment variable or the `--db-dir` CLI flag.
+All files live in `./data/` by default. Override with the `DB_DIR` environment variable.
 
 ---
 
 ## Database Reference
 
-All paths are relative to `DB_DIR` (default `./data/`).
-
-### Simulation Databases
-
-These track the virtual world the simulation draws from. Agents should treat them
-as **read-only** unless they have a specific reason to alter the sim pool.
+Your agent should read from and write to these seven databases only.
 
 ---
 
-#### `sim_customers.db`
+### `cars_available.db`
 
-The pool of 1,000 synthetic customers. As the sim runs, customers move through
-statuses as they interact with the dealership.
+The dealership's vehicle catalogue — every car that has ever been available for sale.
+Use this to look up vehicle details by VIN or to find what stock exists.
 
-| Column    | Type          | Notes                                      |
-|-----------|---------------|--------------------------------------------|
-| id        | INTEGER PK    |                                            |
-| name      | TEXT NOT NULL |                                            |
-| address   | TEXT          |                                            |
-| city      | TEXT          |                                            |
-| state     | TEXT          |                                            |
-| zip       | TEXT          |                                            |
-| phone     | TEXT          |                                            |
-| email     | TEXT          |                                            |
-| status    | TEXT NOT NULL | `available` → `lead` or `walk-in` → `sold` |
+**Table: `sim_cars`**
 
-**Status flow:**
-```
-available ──► lead (pulled by lead_creation)
-available ──► walk-in (walk_ins worker)
-lead / walk-in ──► sold (finance_sales closes)
-```
-
----
-
-#### `sim_employees.db`
-
-The pool of 1,000 synthetic employees. The seeder assigns a subset to
-departments and mirrors them into EMS and ERP.
-
-| Column        | Type             | Notes                                      |
-|---------------|------------------|--------------------------------------------|
-| id            | INTEGER PK       |                                            |
-| name          | TEXT NOT NULL    |                                            |
-| address       | TEXT             |                                            |
-| phone         | TEXT             |                                            |
-| email         | TEXT             |                                            |
-| weekly_salary | NUMERIC(10,2)    |                                            |
-| department    | TEXT nullable    | `BD`, `sales`, `finance`, `accessories`, `service` |
-| status        | TEXT NOT NULL    | `available`, `used`                        |
-
----
-
-#### `sim_cars.db`
-
-The pool of 1,000 synthetic vehicles. `min_price` is the dealer's cost — the
-DMS records the same value and sells at a margin above it.
-
-| Column    | Type             | Notes                                    |
-|-----------|------------------|------------------------------------------|
-| id        | INTEGER PK       |                                          |
-| make      | TEXT NOT NULL    | e.g., `Toyota`                           |
-| model     | TEXT NOT NULL    | e.g., `Camry`                            |
-| year      | INTEGER NOT NULL |                                          |
-| vin       | TEXT NOT NULL    | UNIQUE                                   |
-| condition | TEXT NOT NULL    | `new` (2022–2025), `used` (2010–2022)   |
+| Column    | Type             | Notes                                         |
+|-----------|------------------|-----------------------------------------------|
+| id        | INTEGER PK       |                                               |
+| make      | TEXT NOT NULL    | e.g., `Toyota`                                |
+| model     | TEXT NOT NULL    | e.g., `Camry`                                 |
+| year      | INTEGER NOT NULL |                                               |
+| vin       | TEXT NOT NULL    | UNIQUE                                        |
+| condition | TEXT NOT NULL    | `new` (2022–2025) or `used` (2010–2022)       |
 | min_price | NUMERIC(10,2)    | Dealer cost (new: $25k–$100k, used: $10k–$50k) |
-| status    | TEXT NOT NULL    | `available`, `used`                      |
+| status    | TEXT NOT NULL    | `available` (in catalogue), `used` (on lot)   |
 
 ---
 
-#### `sim_results.db`
-
-One row per simulated day — the daily stats snapshot written by the reporter.
-Useful for historical trend queries.
-
-| Column          | Type          | Notes                        |
-|-----------------|---------------|------------------------------|
-| id              | INTEGER PK    |                              |
-| sim_date        | DATE NOT NULL |                              |
-| cars_sold       | INTEGER       |                              |
-| cars_acquired   | INTEGER       |                              |
-| new_leads       | INTEGER       |                              |
-| leads_processed | INTEGER       |                              |
-| cash_deals      | INTEGER       |                              |
-| loans           | INTEGER       |                              |
-| total_employees | INTEGER       |                              |
-| total_revenue   | NUMERIC(12,2) |                              |
-| total_car_costs | NUMERIC(12,2) |                              |
-| total_salaries  | NUMERIC(12,2) |                              |
-
----
-
-### Company Databases
-
-These are the "real" business records. Your agents should primarily read and
-write to these.
-
----
-
-#### `lms.db` — Lead Management System
+### `lms.db` — Lead Management System
 
 Tracks every prospect from first contact through to appointment scheduling.
 
-| Column       | Type          | Notes                                           |
-|--------------|---------------|-------------------------------------------------|
-| id           | INTEGER PK    |                                                 |
-| customer_name| TEXT NOT NULL |                                                 |
-| address      | TEXT          |                                                 |
-| phone        | TEXT          |                                                 |
-| email        | TEXT          |                                                 |
-| notes        | TEXT          | JSON array: `[{"date": "YYYY-MM-DD", "text": "…"}, …]` |
-| status       | TEXT NOT NULL | See status flow below                           |
-| last_updated | DATE          |                                                 |
+**Table: `lms_leads`**
+
+| Column        | Type          | Notes                                                      |
+|---------------|---------------|------------------------------------------------------------|
+| id            | INTEGER PK    |                                                            |
+| customer_name | TEXT NOT NULL |                                                            |
+| address       | TEXT          |                                                            |
+| phone         | TEXT          |                                                            |
+| email         | TEXT          |                                                            |
+| notes         | TEXT          | JSON array: `[{"date": "YYYY-MM-DD", "text": "…"}, …]`    |
+| status        | TEXT NOT NULL | See status flow below                                      |
+| last_updated  | DATE          |                                                            |
 
 **Status flow:**
 ```
 new
- ├──► contacted  (lead_processing: 70% contact rate)
- │      ├──► interested     (50% of contacted)
- │      │      └──► scheduled  (schedule_lead: 40% of interested)
- │      ├──► not_interested  (30% of contacted)
- │      └──► (stays contacted)
- └──► (stays new — missed contact)
-```
-After a sale closes, `finance_sales` sets the lead status to `met`.
+ ├──► contacted
+ │      ├──► interested
+ │      │      └──► scheduled
+ │      └──► not_interested
+ └──► (stays new — contact missed)
 
-**Notes format** — read/write helpers on the ORM model:
+(any status) ──► met   (after a sale closes)
+```
+
+**Notes format:**
 ```python
-lead.get_notes()                      # → list of {date, text} dicts
-lead.add_note("2025-03-01", "text")   # appends and re-serialises JSON
+# Notes are stored as a JSON array. Read and append like this:
+import json
+
+row = conn.execute("SELECT notes FROM lms_leads WHERE id = ?", (lead_id,)).fetchone()
+notes = json.loads(row["notes"] or "[]")
+notes.append({"date": "2025-03-01", "text": "Called, very interested in SUVs."})
+conn.execute("UPDATE lms_leads SET notes = ?, last_updated = ? WHERE id = ?",
+             (json.dumps(notes), "2025-03-01", lead_id))
+conn.commit()
 ```
 
 ---
 
-#### `crm.db` — Customer Relationship Management
+### `crm.db` — Customer Relationship Management
 
-Created when a customer arrives (walk-in or scheduled appointment). Tracks the
-full sales interaction through to close or drop.
+Created when a customer arrives (walk-in or scheduled appointment). Tracks the full
+sales interaction from arrival through to close or drop.
 
-| Column          | Type          | Notes                                 |
-|-----------------|---------------|---------------------------------------|
-| id              | INTEGER PK    |                                       |
-| customer_name   | TEXT NOT NULL |                                       |
-| address         | TEXT          |                                       |
-| phone           | TEXT          |                                       |
-| email           | TEXT          |                                       |
-| salesperson_name| TEXT          |                                       |
-| meeting_date    | DATE          |                                       |
-| notes           | TEXT          | JSON array same format as lms         |
-| status          | TEXT NOT NULL | See status flow below                 |
-| car_make        | TEXT          | Set when a car is shown               |
-| car_model       | TEXT          |                                       |
-| car_year        | INTEGER       |                                       |
-| car_vin         | TEXT          |                                       |
-| car_condition   | TEXT          |                                       |
-| sale_price      | NUMERIC(10,2) | Set when deal closes                  |
+**Table: `crm_records`**
+
+| Column           | Type          | Notes                                  |
+|------------------|---------------|----------------------------------------|
+| id               | INTEGER PK    |                                        |
+| customer_name    | TEXT NOT NULL |                                        |
+| address          | TEXT          |                                        |
+| phone            | TEXT          |                                        |
+| email            | TEXT          |                                        |
+| salesperson_name | TEXT          |                                        |
+| meeting_date     | DATE          |                                        |
+| notes            | TEXT          | JSON array, same format as `lms_leads` |
+| status           | TEXT NOT NULL | See status flow below                  |
+| car_make         | TEXT          | Set when a car is shown                |
+| car_model        | TEXT          |                                        |
+| car_year         | INTEGER       |                                        |
+| car_vin          | TEXT          |                                        |
+| car_condition    | TEXT          |                                        |
+| sale_price       | NUMERIC(10,2) | Set when deal closes                   |
 
 **Status flow:**
 ```
 scheduled
- ├──► no_show        (20% — sales_followup may reschedule)
+ ├──► no_show
  └──► met
-       ├──► in_negotiation  (60% of met)
-       │      ├──► sold      (finance_sales: ~60% close rate)
-       │      └──► no_sale   (40% of in_negotiation)
-       └──► waiting          (40% of met — no negotiation started)
+       ├──► in_negotiation
+       │      ├──► sold
+       │      └──► no_sale
+       └──► waiting
 ```
 
 ---
 
-#### `dms.db` — Dealer Management System
+### `dms.db` — Dealer Management System
 
-One row per vehicle on the lot. Created by `new_cars` worker, updated through
-the sales process.
+One row per vehicle on the lot. This is the live inventory record — what is on the
+floor, what is being negotiated, and what has sold.
 
-| Column           | Type          | Notes                                  |
-|------------------|---------------|----------------------------------------|
-| id               | INTEGER PK    |                                        |
-| make             | TEXT NOT NULL |                                        |
-| model            | TEXT NOT NULL |                                        |
-| year             | INTEGER       |                                        |
-| vin              | TEXT NOT NULL | UNIQUE                                 |
-| condition        | TEXT NOT NULL | `new` or `used`                        |
-| min_price        | NUMERIC(10,2) | Dealer cost (floor price)              |
-| status           | TEXT NOT NULL | `available`, `in_negotiation`, `sold`  |
-| sale_date        | DATE          | Set when sold                          |
-| sale_price       | NUMERIC(10,2) | min_price × (1.0 – 1.15 margin)       |
-| customer_name    | TEXT          | Set when sold                          |
-| customer_address | TEXT          |                                        |
-| customer_phone   | TEXT          |                                        |
-| customer_email   | TEXT          |                                        |
+**Table: `dms_cars`**
 
----
+| Column           | Type          | Notes                                   |
+|------------------|---------------|-----------------------------------------|
+| id               | INTEGER PK    |                                         |
+| make             | TEXT NOT NULL |                                         |
+| model            | TEXT NOT NULL |                                         |
+| year             | INTEGER       |                                         |
+| vin              | TEXT NOT NULL | UNIQUE                                  |
+| condition        | TEXT NOT NULL | `new` or `used`                         |
+| min_price        | NUMERIC(10,2) | Dealer cost (floor price)               |
+| status           | TEXT NOT NULL | `available`, `in_negotiation`, `sold`   |
+| sale_date        | DATE          | Set when sold                           |
+| sale_price       | NUMERIC(10,2) | Typically min_price × 1.0–1.15 margin   |
+| customer_name    | TEXT          | Set when sold                           |
+| customer_address | TEXT          |                                         |
+| customer_phone   | TEXT          |                                         |
+| customer_email   | TEXT          |                                         |
 
-#### `erp.db` — Enterprise Resource Planning
-
-Two tables: employees (payroll records) and transactions (the general ledger).
-
-**`erp_employees`**
-
-| Column        | Type          | Notes                                 |
-|---------------|---------------|---------------------------------------|
-| id            | INTEGER PK    |                                       |
-| name          | TEXT NOT NULL |                                       |
-| weekly_salary | NUMERIC(10,2) |                                       |
-| department    | TEXT          |                                       |
-
-**`erp_transactions`** — append-only general ledger
-
-| Column           | Type          | Notes                                  |
-|------------------|---------------|----------------------------------------|
-| id               | INTEGER PK    |                                        |
-| transaction_type | TEXT NOT NULL | `credit` (income) or `debit` (expense) |
-| amount           | NUMERIC(12,2) |                                        |
-| payee_payer      | TEXT          | Customer name, employee name, etc.     |
-| description      | TEXT          | Human-readable note                    |
-| transaction_date | DATE NOT NULL |                                        |
-
-**Credit sources:** vehicle sales (`finance_sales`), loan payments (`finance_payments`)
-**Debit sources:** payroll (`payday`), inventory acquisition (`new_cars`)
+**Status flow:**
+```
+available ──► in_negotiation ──► sold
+                             └──► available  (if deal falls through)
+```
 
 ---
 
-#### `lss.db` — Loan Servicing System
+### `erp.db` — Enterprise Resource Planning
 
-One row per active or completed loan. `payments_left` counts down to zero.
+Two tables: employee payroll records and the general ledger.
 
-| Column         | Type          | Notes                                     |
-|----------------|---------------|-------------------------------------------|
-| id             | INTEGER PK    |                                           |
-| customer_name  | TEXT NOT NULL |                                           |
-| address        | TEXT          |                                           |
-| phone          | TEXT          |                                           |
-| email          | TEXT          |                                           |
-| start_date     | DATE          |                                           |
-| payments_left  | INTEGER       | Counts down each month                    |
-| payment_amount | NUMERIC(10,2) | Monthly payment                           |
-| interest_rate  | NUMERIC(5,4)  | e.g., `0.0650` = 6.5%                    |
-| down_payment   | NUMERIC(10,2) |                                           |
-| original_price | NUMERIC(10,2) | Full vehicle sale price                   |
+**Table: `erp_employees`**
 
----
+| Column        | Type          | Notes                              |
+|---------------|---------------|------------------------------------|
+| id            | INTEGER PK    |                                    |
+| name          | TEXT NOT NULL |                                    |
+| weekly_salary | NUMERIC(10,2) |                                    |
+| department    | TEXT          | `BD`, `sales`, `finance`, etc.     |
 
-#### `ems.db` — Employee Management System
+**Table: `erp_transactions`** — append-only general ledger
 
-Tracks active employees and their scheduled appointments with customers.
+| Column           | Type          | Notes                                   |
+|------------------|---------------|-----------------------------------------|
+| id               | INTEGER PK    |                                         |
+| transaction_type | TEXT NOT NULL | `credit` (income) or `debit` (expense)  |
+| amount           | NUMERIC(12,2) |                                         |
+| payee_payer      | TEXT          | Customer name, employee name, etc.      |
+| description      | TEXT          | Human-readable note                     |
+| transaction_date | DATE NOT NULL |                                         |
 
-**`ems_employees`**
-
-| Column            | Type     | Notes                                   |
-|-------------------|----------|-----------------------------------------|
-| id                | INTEGER PK |                                       |
-| name              | TEXT     |                                         |
-| department        | TEXT     | `BD`, `sales`, `finance`, etc.          |
-| current_customers | INTEGER  | Workload counter for round-robin assign  |
-| last_assignment   | DATETIME |                                         |
-
-**`ems_calendar`**
-
-| Column         | Type     | Notes                                       |
-|----------------|----------|---------------------------------------------|
-| id             | INTEGER PK |                                           |
-| employee_id    | INTEGER  | FK → ems_employees.id                       |
-| customer_name  | TEXT     |                                             |
-| scheduled_date | DATE     |                                             |
-| scheduled_time | TIME     | Hour-aligned, from [9,10,11,13,14,15,16,17] |
+**Credits:** vehicle sales, loan payments received
+**Debits:** payroll, inventory purchases
 
 ---
 
-## Simulation State File
+### `lss.db` — Loan Servicing System
 
-**Path:** `{DB_DIR}/simulation_state.json`
+One row per loan. `payments_left` counts down to zero as monthly payments are received.
 
-The simulation rewrites this file after every worker and at every step-mode
-pause. It is your primary synchronisation point.
+**Table: `lss_loans`**
+
+| Column         | Type          | Notes                              |
+|----------------|---------------|------------------------------------|
+| id             | INTEGER PK    |                                    |
+| customer_name  | TEXT NOT NULL |                                    |
+| address        | TEXT          |                                    |
+| phone          | TEXT          |                                    |
+| email          | TEXT          |                                    |
+| start_date     | DATE          |                                    |
+| payments_left  | INTEGER       | Counts down each month             |
+| payment_amount | NUMERIC(10,2) | Monthly payment                    |
+| interest_rate  | NUMERIC(5,4)  | e.g., `0.0650` = 6.5%             |
+| down_payment   | NUMERIC(10,2) |                                    |
+| original_price | NUMERIC(10,2) | Full vehicle sale price            |
+
+---
+
+### `ems.db` — Employee Management System
+
+Tracks active employees and their appointment calendars.
+
+**Table: `ems_employees`**
+
+| Column            | Type          | Notes                                    |
+|-------------------|---------------|------------------------------------------|
+| id                | INTEGER PK    |                                          |
+| name              | TEXT          |                                          |
+| department        | TEXT          | `BD`, `sales`, `finance`, etc.           |
+| current_customers | INTEGER       | Workload counter for round-robin assigns |
+| last_assignment   | DATETIME      |                                          |
+
+**Table: `ems_calendar`**
+
+| Column         | Type          | Notes                                         |
+|----------------|---------------|-----------------------------------------------|
+| id             | INTEGER PK    |                                               |
+| employee_id    | INTEGER       | FK → ems_employees.id                         |
+| customer_name  | TEXT          |                                               |
+| scheduled_date | DATE          |                                               |
+| scheduled_time | TIME          | Hour-aligned: 9, 10, 11, 13, 14, 15, 16, 17  |
+
+---
+
+## How Agents Are Triggered
+
+Your agent does not need to know how or when the underlying data changes. Instead,
+poll `simulation_state.json` every few seconds. When the `current_date` field
+changes, a full business day has completed and the databases reflect the new state.
+Run your agent logic, then go back to polling.
+
+**`simulation_state.json` — the fields your agent cares about:**
 
 ```json
 {
   "status": "running",
   "current_date": "2025-03-05",
-  "start_date": "2025-02-18",
-  "end_date": "2025-03-20",
-  "day_number": 15,
-  "total_days": 30,
-  "last_completed_worker": "finance_sales",
-  "last_updated": "2025-03-05T14:22:11.438210Z",
-  "workers_enabled": [
-    "lead_creation", "lead_processing", "schedule_lead",
-    "walk_ins", "sales_meeting", "sales_followup",
-    "new_cars", "finance_sales", "finance_payments", "payday"
-  ],
-  "workers_disabled": []
+  "end_date": "2025-03-20"
 }
 ```
 
-| Field                  | Type    | Notes                                                        |
-|------------------------|---------|--------------------------------------------------------------|
-| `status`               | string  | `running`, `paused` (step-mode), `completed`                |
-| `current_date`         | string  | ISO 8601 date — the day currently being processed           |
-| `start_date`           | string  | First day of the simulation                                  |
-| `end_date`             | string  | Day the simulation will stop (exclusive — last day is end-1) |
-| `day_number`           | int     | 1-indexed counter                                            |
-| `total_days`           | int     | `(end_date - start_date).days`                              |
-| `last_completed_worker`| string  | Name of last worker that ran, or `null`                     |
-| `last_updated`         | string  | UTC ISO 8601 timestamp — use to detect stale state          |
-| `workers_enabled`      | array   | Workers that are active this run                             |
-| `workers_disabled`     | array   | Workers explicitly disabled via CLI or `.env`               |
+| Field          | Type   | Notes                                                          |
+|----------------|--------|----------------------------------------------------------------|
+| `status`       | string | `running` or `completed` — stop your agent when `completed`   |
+| `current_date` | string | ISO 8601 date. When this changes, a new day's data is ready.  |
+| `end_date`     | string | The date the run ends (exclusive). Informational only.         |
 
-**Reading this file safely:**
-
-```python
-import json, os
-
-def read_state(db_dir="./data"):
-    path = os.path.join(db_dir, "simulation_state.json")
-    if not os.path.exists(path):
-        return None
-    with open(path) as f:
-        return json.load(f)
-```
-
-The file is always written atomically by the sim (open → write → close). A read
-that catches a partial write will raise `json.JSONDecodeError` — retry once if
-that happens.
+That is all your agent needs to read from this file. Ignore all other fields.
 
 ---
 
-## Event Log
+## Polling Pattern
 
-**Database:** `events.db`, table `events`
-
-The event log is append-only and written by workers at significant moments. It
-is the cleanest way for an agent to know *what happened* without polling every
-company table.
-
-| Column       | Type    | Populated by                                              |
-|--------------|---------|-----------------------------------------------------------|
-| id           | INTEGER | Auto                                                      |
-| sim_date     | DATE    | Simulation date of the event                              |
-| sim_timestamp| DATETIME| Wall-clock UTC time it was logged                         |
-| worker_name  | TEXT    | e.g., `lead_creation`, `finance_sales`, `payday`          |
-| action       | TEXT    | e.g., `create`, `sale`, `payroll`                         |
-| entity_type  | TEXT    | e.g., `lms_lead`, `crm_record` — nullable                |
-| entity_id    | INTEGER | PK of the affected record — nullable                      |
-| old_status   | TEXT    | Status before change — nullable                           |
-| new_status   | TEXT    | Status after change — nullable                            |
-| amount       | NUMERIC | Financial value where relevant — nullable                 |
-| description  | TEXT    | Human-readable summary                                    |
-
-**Currently logged events:**
-
-| Worker          | Action    | entity_type  | Notes                              |
-|-----------------|-----------|--------------|------------------------------------|
-| lead_creation   | create    | lms_lead     | New lead added                     |
-| finance_sales   | sale      | crm_record   | Deal closed, amount = sale price   |
-| payday          | payroll   | *(null)*     | Amount = total payroll             |
-
-Not every worker logs to events — those that don't produce only console output.
-Your agent can add its own event rows using the same table.
-
-**Query new events since a known ID:**
-```python
-import sqlite3, os
-
-def get_events_since(last_id, db_dir="./data"):
-    conn = sqlite3.connect(os.path.join(db_dir, "events.db"))
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        "SELECT * FROM events WHERE id > ? ORDER BY id", (last_id,)
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-```
-
----
-
-## Worker Schedule
-
-Workers run in this fixed order every day. Whether a given worker actually
-executes depends on the schedule below.
-
-| # | Worker Name        | Schedule                                       | Key Output                        |
-|---|--------------------|------------------------------------------------|-----------------------------------|
-| 0 | `lead_creation`    | Every 5 days from start (`delta % 5 == 0`)    | New rows in `lms_leads`           |
-| 1 | `lead_processing`  | Weekdays only (Mon–Fri)                        | LMS status advances               |
-| 2 | `schedule_lead`    | Weekdays only                                  | LMS → `scheduled`, EMS calendar   |
-| 3 | `walk_ins`         | Every day                                      | New CRM records, EMS assignments  |
-| 4 | `sales_meeting`    | Every day                                      | CRM status advances, DMS locked   |
-| 5 | `sales_followup`   | Every 3 days after start (`delta > 0 && delta % 3 == 0`) | CRM reschedules / drops |
-| 6 | `new_cars`         | Every 5 days after start (`delta > 0 && delta % 5 == 0`) | DMS inventory added, ERP debit |
-| 7 | `finance_sales`    | Every day                                      | CRM → `sold`, ERP credit, LSS loan|
-| 8 | `finance_payments` | 1st of every month                             | LSS payments down, ERP credit     |
-| 9 | `payday`           | Every Friday                                   | ERP debits, event logged          |
-
-`delta` = `(current_date − start_date).days`
-
----
-
-## Day Lifecycle
-
-Understanding the exact sequence within a single day is essential for writing
-correct agents.
-
-```
-Day N begins
-│
-├─ write_state("running", last_completed_worker=null)
-│
-├─ FOR each worker in schedule order:
-│    ├─ [skip if not scheduled today]
-│    ├─ worker.run(sim_date, rng)   ← DB reads/writes happen here
-│    └─ write_state("running", last_completed_worker=<this worker>)
-│
-├─ reporter.record_day()           ← writes to sim_results.db
-│
-├─ [step-mode only]
-│    ├─ write_state("paused", ...)
-│    ├─ block on stdin
-│    └─ write_state("running", ...)
-│
-└─ current_date += 1 day → Day N+1 begins
-```
-
-The state file is written **after each individual worker**, not once per day.
-`last_completed_worker` tells you exactly how far through the day the sim has
-progressed.
-
----
-
-## Synchronization Patterns
-
-### Free-Running Mode
-
-In free-running mode the simulation runs as fast as it can. Your agent polls
-`simulation_state.json` and reacts to day boundaries.
-
-**Recommended pattern: watch for date changes**
+Poll `simulation_state.json` every 2–5 seconds. When `current_date` changes from
+the last value your agent saw, the day is complete and it is safe to read and write
+the business databases.
 
 ```python
-import json, time, os
-from datetime import date
-
-DB_DIR = "./data"
-STATE_PATH = os.path.join(DB_DIR, "simulation_state.json")
-
-def read_state():
-    try:
-        with open(STATE_PATH) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return None
-
-def wait_for_next_day(known_date: str, poll_interval: float = 0.5) -> dict:
-    """Block until simulation_state.json shows a new date. Returns new state."""
-    while True:
-        state = read_state()
-        if state is None:
-            time.sleep(poll_interval)
-            continue
-        if state["status"] == "completed":
-            return state
-        if state["current_date"] != known_date:
-            return state
-        time.sleep(poll_interval)
-
-def run_agent():
-    last_date = None
-
-    while True:
-        state = wait_for_next_day(last_date, poll_interval=0.25)
-
-        if state["status"] == "completed":
-            print("Simulation complete — agent shutting down")
-            break
-
-        sim_date = state["current_date"]
-        day_number = state["day_number"]
-        print(f"Agent: reacting to day {day_number} ({sim_date})")
-
-        # --- your agent logic here ---
-        # Read events that just occurred:
-        #   new_events = get_events_since(last_event_id)
-        # Read company DBs:
-        #   leads = query_lms(sim_date)
-        # Write decisions back:
-        #   schedule_callback(lead_id, sim_date)
-        # -----------------------------
-
-        last_date = sim_date
-
-if __name__ == "__main__":
-    run_agent()
-```
-
-**Adding a minimum wait between days** (to throttle or simulate "real time"):
-
-```python
+import json
+import os
+import sqlite3
 import time
 
-MIN_DAY_INTERVAL = 2.0  # seconds between agent reactions
-
-def run_agent_throttled():
-    last_date = None
-    last_reaction_time = 0.0
-
-    while True:
-        state = wait_for_next_day(last_date, poll_interval=0.1)
-
-        if state["status"] == "completed":
-            break
-
-        # Enforce minimum interval
-        elapsed = time.monotonic() - last_reaction_time
-        if elapsed < MIN_DAY_INTERVAL:
-            time.sleep(MIN_DAY_INTERVAL - elapsed)
-
-        sim_date = state["current_date"]
-        # ... agent logic ...
-        last_date = sim_date
-        last_reaction_time = time.monotonic()
-```
-
----
-
-### Step-by-Step Mode
-
-In step mode the simulation pauses after every day and waits for a newline on
-`stdin` before advancing. This is the cleanest pattern for an agent that needs
-guaranteed processing time before the sim moves on.
-
-The sim writes `status: "paused"` to the state file, then blocks reading stdin.
-Your agent detects the pause, does its work, then sends a newline to the sim's
-stdin to release it.
-
-**Pattern: launch the sim as a subprocess, control stdin**
-
-```python
-import subprocess, json, time, os, sys
-from threading import Thread
-
 DB_DIR = "./data"
 STATE_PATH = os.path.join(DB_DIR, "simulation_state.json")
 
-def read_state():
+
+def read_state() -> dict | None:
+    """Read simulation_state.json. Returns None on missing file or bad JSON."""
     try:
         with open(STATE_PATH) as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return None
 
-def wait_for_status(target_status: str, timeout: float = 30.0) -> dict | None:
-    """Poll until state file shows the target status."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+
+def run_agent(poll_interval: float = 3.0) -> None:
+    """
+    Main agent loop. Polls for a date change every `poll_interval` seconds,
+    then runs agent logic once per day.
+    """
+    last_date = None
+
+    while True:
         state = read_state()
-        if state and state["status"] == target_status:
-            return state
-        time.sleep(0.1)
-    return None  # timed out
 
-def run_agent_step_mode(days: int = 7, seed: int = 42):
-    # Start the simulation in step mode, inheriting stdout/stderr so output
-    # is visible, but taking control of stdin via a pipe.
-    sim = subprocess.Popen(
-        [
-            ".venv/bin/python", "main.py",
-            "--reset",
-            f"--days={days}",
-            f"--seed={seed}",
-            "--step-mode",
-        ],
-        stdin=subprocess.PIPE,
-        # stdout and stderr inherit from parent — you'll see sim output
-    )
+        if state is None:
+            # State file not written yet — wait and retry
+            time.sleep(poll_interval)
+            continue
 
-    try:
-        while True:
-            # Wait for the sim to pause at end of day
-            state = wait_for_status("paused", timeout=60.0)
+        if state["status"] == "completed":
+            print("Run complete — agent shutting down.")
+            break
 
-            if state is None:
-                # Check if sim exited cleanly
-                if sim.poll() is not None:
-                    print("Simulation process ended")
-                    break
-                print("Warning: timed out waiting for paused state")
-                break
+        current_date = state["current_date"]
 
-            sim_date = state["current_date"]
-            day_number = state["day_number"]
-            print(f"\nAgent: sim paused after day {day_number} ({sim_date})")
+        if current_date != last_date:
+            print(f"New day detected: {current_date}")
+            do_agent_work(current_date)
+            last_date = current_date
 
-            # --- your agent logic here ---
-            # All workers for this day have completed at this point.
-            # Read company DBs, make decisions, write back.
-            do_agent_work(sim_date)
-            # -----------------------------
+        time.sleep(poll_interval)
 
-            # Signal the sim to advance to the next day
-            print(f"Agent: advancing sim to day {day_number + 1}")
-            sim.stdin.write(b"\n")
-            sim.stdin.flush()
 
-            # Brief pause so sim can transition to "running" before we poll again
-            time.sleep(0.2)
-
-            # Check for completion
-            final = read_state()
-            if final and final["status"] == "completed":
-                print("Simulation complete")
-                break
-
-    finally:
-        sim.stdin.close()
-        sim.wait()
-
-def do_agent_work(sim_date: str):
-    """Placeholder — implement your agent logic here."""
-    import sqlite3
+def do_agent_work(current_date: str) -> None:
+    """
+    Called once per day when current_date changes.
+    Read the business databases, make decisions, write back.
+    """
+    # Example: count open leads
     conn = sqlite3.connect(os.path.join(DB_DIR, "lms.db"))
-    new_leads = conn.execute(
-        "SELECT id, customer_name FROM lms_leads WHERE status = 'new'"
-    ).fetchall()
+    conn.row_factory = sqlite3.Row
+    open_leads = conn.execute(
+        "SELECT COUNT(*) as n FROM lms_leads WHERE status IN ('new', 'contacted', 'interested')"
+    ).fetchone()["n"]
     conn.close()
-    print(f"  Agent sees {len(new_leads)} uncontacted leads")
-    # ... make decisions, write back, etc.
+
+    print(f"  {current_date}: {open_leads} leads need attention")
+    # ... query other databases, write decisions back ...
+
 
 if __name__ == "__main__":
-    run_agent_step_mode(days=7, seed=42)
+    run_agent(poll_interval=3.0)
 ```
-
-**Step-mode timing guarantee:**
-
-When your agent detects `status == "paused"`, all 10 workers for that day have
-already completed. The databases reflect the full end-of-day state. You have
-exclusive write access to the company databases (the sim is blocked on stdin
-and will not touch them until you send the newline).
 
 ---
 
-## Reading from Databases Safely
+## Reading from Databases
 
-All databases use WAL mode. You can open a read connection at any time without
-blocking or corrupting the sim's writes.
-
-**Using raw sqlite3 (no dependencies):**
+All databases use WAL mode. Open a read-only connection at any time — it will never
+block or conflict with writes happening in the background.
 
 ```python
-import sqlite3, os
+import sqlite3
+import os
 
-def query(db_name: str, sql: str, params=(), db_dir="./data"):
-    path = os.path.join(db_dir, db_name)
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)  # read-only
+DB_DIR = "./data"
+
+
+def query(db_name: str, sql: str, params: tuple = ()) -> list[dict]:
+    """Read-only query against any business database."""
+    path = os.path.join(DB_DIR, db_name)
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     rows = conn.execute(sql, params).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
+
 # Examples
+
+# All uncontacted leads
 leads = query("lms.db", "SELECT * FROM lms_leads WHERE status = 'new'")
 
+# Deals currently in negotiation
 negotiations = query(
     "crm.db",
     "SELECT * FROM crm_records WHERE status = 'in_negotiation'"
 )
 
+# Available inventory on the lot
 inventory = query(
     "dms.db",
-    "SELECT make, model, year, min_price FROM dms_cars WHERE status = 'available'"
+    "SELECT make, model, year, condition, min_price FROM dms_cars WHERE status = 'available'"
 )
 
+# Recent sales revenue
 recent_sales = query(
     "erp.db",
     "SELECT * FROM erp_transactions WHERE transaction_type = 'credit' ORDER BY id DESC LIMIT 20"
 )
-```
 
-**Using SQLAlchemy (same engine the sim uses):**
-
-```python
-import sys
-sys.path.insert(0, "/home/paul/code/auto_dealership")
-
-from database.session import session_for
-from models.company_models import LMSLead, CRMRecord, DMSCar
-
-session = session_for("lms.db")
-leads = session.query(LMSLead).filter_by(status="new").all()
-session.close()
+# Active loans
+active_loans = query(
+    "lss.db",
+    "SELECT * FROM lss_loans WHERE payments_left > 0"
+)
 ```
 
 ---
 
 ## Writing Back to Databases
 
-Your agent can write to any company database. The simulation uses the same
-SQLAlchemy session pattern — follow the same conventions to avoid conflicts.
+Write to the business databases using standard SQLite connections. Always open with
+`PRAGMA journal_mode=WAL` to stay consistent with how the databases were created.
 
-**Safe columns to write to:**
+**What is safe to write:**
 
-| Database | Safe writes                                                    |
-|----------|----------------------------------------------------------------|
-| `lms.db` | `notes`, `status`, `last_updated` on existing leads           |
-| `crm.db` | `notes`, `status` on existing records                         |
-| `dms.db` | `status` on cars (e.g., mark reserved)                        |
-| `erp.db` | New `erp_transactions` rows                                    |
-| `ems.db` | New `ems_calendar` rows                                        |
-| `events.db` | New event rows to log agent actions                         |
+| Database           | Safe writes                                              |
+|--------------------|----------------------------------------------------------|
+| `lms.db`           | `notes`, `status`, `last_updated` on existing leads     |
+| `crm.db`           | `notes`, `status` on existing records                   |
+| `dms.db`           | `status` on existing cars                               |
+| `erp.db`           | New rows in `erp_transactions`                           |
+| `ems.db`           | New rows in `ems_calendar`                               |
+
+**Do not:**
+- Write to `cars_available.db` — treat it as read-only reference data
+- Delete rows from any table — records are expected to persist once created
+- Change `status` fields in a way that skips steps in the flow (e.g., jumping a
+  CRM record from `scheduled` directly to `sold` without an intermediate state)
 
 **Example — add a note to a lead:**
 
 ```python
-import sqlite3, json, os
-from datetime import date
+import sqlite3
+import json
+import os
 
-def add_lead_note(lead_id: int, note_text: str, sim_date: date, db_dir="./data"):
-    path = os.path.join(db_dir, "lms.db")
+DB_DIR = "./data"
+
+
+def add_lead_note(lead_id: int, note_text: str, note_date: str) -> None:
+    path = os.path.join(DB_DIR, "lms.db")
     conn = sqlite3.connect(path)
     conn.execute("PRAGMA journal_mode=WAL")
 
@@ -798,160 +486,150 @@ def add_lead_note(lead_id: int, note_text: str, sim_date: date, db_dir="./data")
         return
 
     notes = json.loads(row[0] or "[]")
-    notes.append({"date": sim_date.isoformat(), "text": note_text})
+    notes.append({"date": note_date, "text": note_text})
 
     conn.execute(
         "UPDATE lms_leads SET notes = ?, last_updated = ? WHERE id = ?",
-        (json.dumps(notes), sim_date.isoformat(), lead_id)
+        (json.dumps(notes), note_date, lead_id)
     )
     conn.commit()
     conn.close()
 ```
 
-**Example — log an agent action to events.db:**
+**Example — schedule a follow-up appointment:**
 
 ```python
-from datetime import datetime, date
-
-def log_agent_event(sim_date: date, action: str, description: str, db_dir="./data"):
-    conn = sqlite3.connect(os.path.join(db_dir, "events.db"))
+def schedule_appointment(employee_id: int, customer_name: str,
+                         appt_date: str, appt_hour: int) -> None:
+    """Add an entry to the EMS calendar."""
+    path = os.path.join(DB_DIR, "ems.db")
+    conn = sqlite3.connect(path)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute(
-        """INSERT INTO events
-           (sim_date, sim_timestamp, worker_name, action, description)
-           VALUES (?, ?, ?, ?, ?)""",
-        (
-            sim_date.isoformat(),
-            datetime.utcnow().isoformat() + "Z",
-            "agent",          # use a distinctive name for your agent
-            action,
-            description,
-        )
+        """INSERT INTO ems_calendar (employee_id, customer_name, scheduled_date, scheduled_time)
+           VALUES (?, ?, ?, ?)""",
+        (employee_id, customer_name, appt_date, f"{appt_hour:02d}:00:00")
     )
     conn.commit()
     conn.close()
 ```
 
-**Avoid:**
-- Writing to `sim_customers`, `sim_employees`, `sim_cars` — these are the sim's
-  internal pool and changes here affect seeding logic
-- Writing to `sim_results` — owned by the reporter
-- Deleting rows from any table — the sim expects records to exist once created
-- Changing `status` fields without understanding the full flow (e.g., a car
-  marked `sold` in DMS should also have a CRM record in `sold` status)
+**Example — record a custom transaction in the ledger:**
 
----
-
-## Configuration Reference
-
-**Environment variables** (`.env` file or shell):
-
-| Variable                    | Default    | Notes                                           |
-|-----------------------------|------------|-------------------------------------------------|
-| `DB_DIR`                    | `./data`   | Directory for all DBs and state.json            |
-| `DB_DRIVER`                 | `sqlite`   | Only sqlite supported currently                 |
-| `OPENAI_API_KEY`            | *(empty)*  | If empty, notes use template fallbacks          |
-| `DISABLE_WORKER_<NAME>=true`| *(unset)*  | e.g., `DISABLE_WORKER_PAYDAY=true`              |
-
-**Key simulation constants** (from `config.py`):
-
-| Constant                 | Value       | Meaning                                      |
-|--------------------------|-------------|----------------------------------------------|
-| `LEAD_CREATION_INTERVAL` | 5 days      | New leads every 5 days                       |
-| `NEW_CARS_INTERVAL`      | 5 days      | Inventory restocked every 5 days             |
-| `SALES_FOLLOWUP_INTERVAL`| 3 days      | Follow-up sweep every 3 days                 |
-| `WALK_IN_MIN/MAX`        | 1–5         | Walk-ins per day                             |
-| `LEAD_CREATION_BATCH_MIN/MAX` | 10–30  | Leads created per creation run              |
-| `NEW_CARS_BATCH_MIN/MAX` | 5–15        | Cars added to inventory per restock run      |
-| `FINANCE_LOAN_RATE`      | 0.65        | 65% of sales are financed                   |
-| `SALES_NO_SHOW_RATE`     | 0.20        | 20% of appointments are no-shows            |
-| `LEAD_CONTACT_RATE`      | 0.70        | 70% of new leads are successfully reached   |
-| `LLM_MAX_CALLS_PER_WORKER` | 10        | Max OpenAI calls per worker per day         |
+```python
+def record_transaction(transaction_type: str, amount: float,
+                       payee_payer: str, description: str, txn_date: str) -> None:
+    path = os.path.join(DB_DIR, "erp.db")
+    conn = sqlite3.connect(path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(
+        """INSERT INTO erp_transactions
+           (transaction_type, amount, payee_payer, description, transaction_date)
+           VALUES (?, ?, ?, ?, ?)""",
+        (transaction_type, amount, payee_payer, description, txn_date)
+    )
+    conn.commit()
+    conn.close()
+```
 
 ---
 
 ## Status Enums Quick Reference
 
 ```
-sim_customers.status:   available → lead | walk-in → sold
-sim_employees.status:   available | used
-sim_cars.status:        available | used
+lms_leads.status:
+    new → contacted → interested → scheduled
+                    → not_interested
+    (any) → met  (after sale closes)
 
-lms_leads.status:       new → contacted → interested → scheduled
-                                        → not_interested
-                        (any) → met (after sale)
+crm_records.status:
+    scheduled → no_show
+              → met → in_negotiation → sold
+                    │               → no_sale
+                    └──► waiting
 
-crm_records.status:     scheduled → no_show
-                                  → met → waiting
-                                       → in_negotiation → sold
-                                                        → no_sale
-                                       → no_sale
+dms_cars.status:
+    available → in_negotiation → sold
+                               → available  (deal fell through)
 
-dms_cars.status:        available → in_negotiation → sold
-                                  → available (if no_sale)
-
-erp_transactions.type:  credit (income) | debit (expense)
+erp_transactions.transaction_type:
+    credit  (income: sales, loan payments)
+    debit   (expense: payroll, inventory purchases)
 ```
 
 ---
 
 ## Common Agent Recipes
 
-### "What happened today?"
+### "Which leads need attention today?"
 
 ```python
-def summarise_day(sim_date: str, db_dir="./data"):
-    events = query("events.db",
-        "SELECT * FROM events WHERE sim_date = ? ORDER BY id",
-        (sim_date,), db_dir)
-
-    sales = query("crm.db",
-        "SELECT customer_name, sale_price, car_make, car_model, car_year "
-        "FROM crm_records WHERE status = 'sold' AND meeting_date = ?",
-        (sim_date,), db_dir)
-
-    new_leads = query("lms.db",
-        "SELECT COUNT(*) as n FROM lms_leads WHERE last_updated = ? AND status = 'new'",
-        (sim_date,), db_dir)
-
-    return {"events": events, "sales": sales, "new_leads": new_leads[0]["n"]}
-```
-
-### "Which customers need follow-up?"
-
-```python
-def leads_needing_attention(db_dir="./data"):
+def leads_needing_attention() -> list[dict]:
     return query("lms.db",
         """SELECT id, customer_name, status, last_updated
            FROM lms_leads
-           WHERE status IN ('new', 'contacted', 'interested', 'schedule')
-           ORDER BY last_updated ASC""",
-        db_dir=db_dir)
+           WHERE status IN ('new', 'contacted', 'interested')
+           ORDER BY last_updated ASC""")
 ```
 
-### "What's the current inventory value?"
+### "What sales closed today?"
 
 ```python
-def inventory_value(db_dir="./data"):
-    rows = query("dms.db",
-        "SELECT SUM(min_price) as cost, COUNT(*) as count "
-        "FROM dms_cars WHERE status = 'available'",
-        db_dir=db_dir)
-    return rows[0]
+def sales_closed_on(date: str) -> list[dict]:
+    return query("crm.db",
+        """SELECT customer_name, salesperson_name, car_make, car_model,
+                  car_year, sale_price
+           FROM crm_records
+           WHERE status = 'sold' AND meeting_date = ?""",
+        (date,))
+```
+
+### "What is the current inventory?"
+
+```python
+def available_inventory() -> list[dict]:
+    return query("dms.db",
+        """SELECT make, model, year, condition, min_price
+           FROM dms_cars
+           WHERE status = 'available'
+           ORDER BY make, model""")
 ```
 
 ### "What is the P&L so far?"
 
 ```python
-def pnl(db_dir="./data"):
+def pnl() -> dict:
     rows = query("erp.db",
         """SELECT transaction_type, SUM(amount) as total
-           FROM erp_transactions GROUP BY transaction_type""",
-        db_dir=db_dir)
+           FROM erp_transactions
+           GROUP BY transaction_type""")
     totals = {r["transaction_type"]: float(r["total"]) for r in rows}
     return {
-        "revenue": totals.get("credit", 0),
-        "expenses": totals.get("debit", 0),
-        "net": totals.get("credit", 0) - totals.get("debit", 0),
+        "revenue":  totals.get("credit", 0.0),
+        "expenses": totals.get("debit",  0.0),
+        "net":      totals.get("credit", 0.0) - totals.get("debit", 0.0),
     }
+```
+
+### "What is the active loan portfolio value?"
+
+```python
+def loan_portfolio_value() -> float:
+    rows = query("lss.db",
+        "SELECT payments_left, payment_amount FROM lss_loans WHERE payments_left > 0")
+    return sum(float(r["payments_left"]) * float(r["payment_amount"]) for r in rows)
+```
+
+### "Which appointments are scheduled for a given date?"
+
+```python
+def appointments_on(date: str) -> list[dict]:
+    return query("ems.db",
+        """SELECT e.name as employee, e.department,
+                  c.customer_name, c.scheduled_time
+           FROM ems_calendar c
+           JOIN ems_employees e ON e.id = c.employee_id
+           WHERE c.scheduled_date = ?
+           ORDER BY c.scheduled_time""",
+        (date,))
 ```

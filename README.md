@@ -110,7 +110,7 @@ All files live in `./data/` (configurable via `DB_DIR` in `.env`):
 |---|---|---|
 | `sim_customers.db` | Simulation | 1,000 generated customers |
 | `sim_employees.db` | Simulation | 1,000 generated employees |
-| `sim_cars.db` | Simulation | 1,000 generated vehicles |
+| `cars_available.db` | Simulation | 1,000 generated vehicles |
 | `sim_results.db` | Simulation | One row per simulated day |
 | `events.db` | Simulation | Append-only event log |
 | `lms.db` | Company | Lead Management System |
