@@ -390,8 +390,8 @@ if __name__ == "__main__":
 
 ## Reading from Databases
 
-All databases use WAL mode. Open a read-only connection at any time — it will never
-block or conflict with writes happening in the background.
+All databases use WAL mode. You can open a connection at any time — it will never
+block or conflict with other writes happening in the background.
 
 ```python
 import sqlite3
@@ -401,9 +401,9 @@ DB_DIR = "./data"
 
 
 def query(db_name: str, sql: str, params: tuple = ()) -> list[dict]:
-    """Read-only query against any business database."""
+    """Query any business database."""
     path = os.path.join(DB_DIR, db_name)
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     rows = conn.execute(sql, params).fetchall()
     conn.close()
@@ -447,18 +447,19 @@ active_loans = query(
 Write to the business databases using standard SQLite connections. Always open with
 `PRAGMA journal_mode=WAL` to stay consistent with how the databases were created.
 
-**What is safe to write:**
+**What you can write:**
 
-| Database           | Safe writes                                              |
-|--------------------|----------------------------------------------------------|
-| `lms.db`           | `notes`, `status`, `last_updated` on existing leads     |
-| `crm.db`           | `notes`, `status` on existing records                   |
-| `dms.db`           | `status` on existing cars                               |
-| `erp.db`           | New rows in `erp_transactions`                           |
-| `ems.db`           | New rows in `ems_calendar`                               |
+| Database             | Writable columns / operations                               |
+|----------------------|-------------------------------------------------------------|
+| `cars_available.db`  | `status` on existing cars                                   |
+| `lms.db`             | `notes`, `status`, `last_updated` on existing leads        |
+| `crm.db`             | `notes`, `status`, `sale_price` on existing records        |
+| `dms.db`             | `status`, `sale_date`, `sale_price`, customer fields        |
+| `erp.db`             | New rows in `erp_transactions`; update `erp_balance`        |
+| `lss.db`             | New loan rows; update `payments_left`                       |
+| `ems.db`             | New rows in `ems_calendar`; update `ems_employees`          |
 
 **Do not:**
-- Write to `cars_available.db` — treat it as read-only reference data
 - Delete rows from any table — records are expected to persist once created
 - Change `status` fields in a way that skips steps in the flow (e.g., jumping a
   CRM record from `scheduled` directly to `sold` without an intermediate state)
