@@ -60,6 +60,10 @@ def parse_args(argv=None):
         "--verbose", action="store_true", default=True,
         help="Verbose per-worker output (default: on)",
     )
+    parser.add_argument(
+        "--delay", type=float, nargs="?", const=10, default=None,
+        help="Seconds to wait between days (default: 10 if flag given with no value)",
+    )
     return parser.parse_args(argv)
 
 
@@ -141,6 +145,7 @@ def main(argv=None):
         dashboard=args.dashboard,
         verbose=args.verbose,
         seed=seed,
+        delay=args.delay,
     )
 
 

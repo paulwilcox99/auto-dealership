@@ -1,6 +1,7 @@
 """Day loop: scheduling logic and step mode."""
 
 import random
+import time
 from contextlib import nullcontext
 from datetime import date, timedelta
 from typing import List
@@ -49,6 +50,7 @@ def run_loop(
     dashboard: bool = False,
     verbose: bool = True,
     seed: int = 0,
+    delay: float = None,
 ) -> None:
     """Main simulation day loop."""
     from reporting.reporter import Reporter
@@ -180,6 +182,10 @@ def run_loop(
                     workers_enabled=enabled_workers,
                     workers_disabled=disabled_workers,
                 )
+            elif delay:
+                if not dashboard:
+                    console.print(f"[dim]Waiting {delay:g}s before next day...[/dim]")
+                time.sleep(delay)
 
             current_date += timedelta(days=1)
 

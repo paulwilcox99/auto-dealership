@@ -104,17 +104,19 @@ class FinanceSalesWorker(BaseWorker):
                 )
                 lss_session.add(lss_loan)
 
+                erp_amount = down_payment
                 deal_type = f"LOAN ${down_payment:,.0f} down"
                 note_ctx = f"customer financed {record.car_year} {record.car_make} {record.car_model} at ${sale_price:,.0f} — loan approved"
             else:
                 cash_deals += 1
+                erp_amount = sale_price
                 deal_type = "CASH"
                 note_ctx = f"customer paid cash for {record.car_year} {record.car_make} {record.car_model} at ${sale_price:,.0f}"
 
-            # ERP credit transaction
+            # ERP credit transaction — down payment for loans, full price for cash
             erp_txn = ERPTransaction(
                 transaction_type=ERP_CREDIT,
-                amount=Decimal(str(sale_price)),
+                amount=Decimal(str(erp_amount)),
                 payee_payer=record.customer_name,
                 description=f"Vehicle sale — {record.car_year} {record.car_make} {record.car_model} VIN:{record.car_vin}",
                 transaction_date=sim_date,
@@ -139,7 +141,7 @@ class FinanceSalesWorker(BaseWorker):
                 sim_session.merge(sim_cust)
 
             cars_sold += 1
-            total_revenue += Decimal(str(sale_price))
+            total_revenue += Decimal(str(erp_amount))
 
             log_event(
                 sim_date, "finance_sales", "sale",
@@ -151,7 +153,7 @@ class FinanceSalesWorker(BaseWorker):
             console.print(
                 f"[dim]{sim_date}[/dim] [cyan]finance_sales[/cyan] ─ "
                 f"CRM #{record.id} ({record.customer_name}): "
-                f"in_negotiation → sold [{deal_type} ${sale_price:,.2f}]"
+                f"in_negotiation → sold [{deal_type} | sale ${sale_price:,.2f}]"
             )
 
         crm_session.commit()
