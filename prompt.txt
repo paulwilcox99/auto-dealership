@@ -1,0 +1,200 @@
+Help me create a program that will simulate the business operation of a car dealership called Main Street Motors.  The dealership sells new and used cars and currently have a business development department (BD) that gets leads and contacts potential customers to get them to schedule a meeting, a Sales team that takes meetings with customers either from leads or from walk ins and tries to sell them a car and the finance team which handles the sale either as a cash deal or a loan payment.  The workflow is from new leads (or walk-ins) to sales, to finance.
+
+The program simulates each day of business operation.  The user inputs a start date (if none specified use current) and how many days they want to simulate.  There are Simulation Databases set up at the beginning to hold the resource information (customers, employees, cars) that will be used in the simulation.  These are synthetic data created with Faker or LLM.   There is also a Results database that holds the results captured after each day.
+
+The company consists of Company Databases that hold the information and track the flow of information as the simulation progresses.  These databases are meant to represent real systems in the car dealership.  The program has simulation functions that are used during the simulation to help generate synthetic data such as notes taken by employees at each stage.
+
+The program has worker functions that represent the actions workers make to move data through the system and make decisions.
+
+The program should be set up to initialize and then loop starting with the input start date for the number of dates specified to simulate, each loop increments the simulation date, each loop steps through each of the worker functions and performs the actions for that date.  Each worker function should be able to be disabled from the command line (so it can be replaced with an external script).  
+
+The idea is for this simulation program to run in parallel with other programs that will synchronize to the current simulation date and will monitor the databases and act independently.  User should be able to step through each year manually (hitting return to progress to next year) or with a delay at the end of each year (default to 10 seconds)
+
+Create the program with Python, use a virtual environment, use Faker and LLM where it makes sense, keep API keys in env file. 
+
+Start by reading through this entire description, then ask me any clarifying questions.  Then plan what you would build suggesting any features that you think may improve the program.  Create an implementation plan and have me review it before creating.
+
+At end create a agent_developer_guide.md file in docs that describes how a developer can create AI agents that run separate from the simulation. Agents connect to the business databases directly, poll a single JSON file to know when a new business day has started, and then read and write the databases as they would in a live dealership environment.  Agents do not need to know anything about the simulation.** From the agent's perspective, the databases are live dealership systems. The only simulation artifact the agent touches is `simulation_state.json`, which serves as a lightweight clock signal telling the agent that a new day's data is ready.
+
+Simulation Databases:
+1) Customers : database to hold list of customer information to be used in simulation 
+	contains: customer name, home postal address, phone number, email address and a status field [available, walk-in, lead, sold]
+2) Employees : database to hold list of employees to be used in simulation
+	contains: employee name, weekly salary, department [BD, sales, finance, accessories, service] and status as available or used
+3) Cars : database to hold list of cars to be sold in simulation
+	contains: make, model, year, VIN, new or used, minimum sale price and status as used or available
+4) Results: database to hold results status for simulation
+	contains: number of cars sold, number of new leads received, number of leads processed, number of cash deals, number of loans, total number of employees, total revenue, total spent on new cars, total spent on employee salaries 
+
+Company Databases
+1) LMS (lead management system) : database to hold leads that have been received) 
+	contains : customer name, home postal address, phone number, email address, 
+		a notes section where text notes can be added with date and note, 
+		a state indicator (new, contacted, interested, not interested, schedule, scheduled, no show, met)
+		last updated date
+2) CRM (customer relationship manager) : database to hold information about customers as they go through sales process
+	contains : customer name, home postal address, phone number, email address, 
+		sales person name and date the meeting is scheduled for
+		a notes section where text notes can be added with date and note, 
+		contains state indicator (scheduled, no show, met, waiting, in negotiation, no sale, sold)
+		contains make, model, year, VIN, new or used, sales price of car they purchased (if they purchase)
+3) DMS (dealer management system) : database where car inventory information is kept
+	contains inventory of all cars available to be sold (and previously sold) : make, model, year, VIN, new or used, minimum sale price
+		state indicator for each car in inventory (available, in negotiation, sold)
+		sale information for sold (date, sale price, customer name, address, phone, email)
+4) ERP (enterprise resource planning) : database that tracks all employees and financial transactions (credits, debits)
+	contains: list of all current employees name, weekly salary, department [BD, sales, finance, accessories, service]
+	contains: credit or debit, amount, payee or payer, description, date of transaction
+	contains: value of total current total assets and current debt for the dealership, current assets is equal to value of cash savings + value of cars not yet sold in inventory
+5) LSS (loan service system) : database of all loans made by finance and their current state
+	contains: customer name, address, phone, email
+		start date of loan, number of payments left, loan payment amount
+		interest rate, down payment, original sale price
+6) EMS (employee management system) : tracks the sales people and their schedules.
+	contains: sales person name, number of current customers, date/time last customer assigned
+		calendar for each sales person that lists the date, time when a customer is scheduled to meet with them.
+
+Initialization: at start of simulation do the following
+1) Create 1000 customers into the customer database with name, address, phone, email from Faker and set status field to available.
+2) Create 1000 employees into employee database with name, address, phone, email from Faker, set weekly salary to random value between $2000 and $20000 set status for all to available and department left blank.
+3) Create 1000 cars into the cars database with random make, model, year, VIN, new or used, minimum sale price between $10,000 and $100,000 and status as used or available
+4) Add a random number of between 5-10 employees from the employee database and mark their department as BD  Change status in employee database to used.  
+5) Add a random number of between 5-10 employees from the employee database and mark their department as Sales  Change status in employee database to used.  
+6) Add a random number of between 5-10 employees from the employee database and mark their department as Finance  Change status in employee database to used.  
+7) Add a random number between 50-100 cars to the DMS system from the cars database and marked them as used.
+8) Add a random value between $100,000 and $5,000,000 to the current total debt for the dealership, Add a random value between $1,000,000 and $20,000,000 for the current total savings for the dealership, and sum the values of the min sales prices for all cars in DMS that are available to be sold.
+
+Simulation Functions
+1) create_note : takes as input customer information (name, address, phone, email) and any notes already input.  outputs a new note entry that would make sense for a conversation about purchasing a car such as "not currently looking", "interested in red cars", "gas mileage is important" note should have the current sim date also in it.  This can be generated using an LLM.
+
+
+Worker Functions
+1) lead_creation : When: occurs on start date and then every 5 days after the start date
+	What: Add a random number between 5 and 25 customer information entries from the customer database into the LMS, update customer status in customer database to used for each one taken out.  set status for each entry in LMS to new and last updated date to current sim date.
+2) lead_processing : When : occurs when current sim date is monday, tuesday, wednesday, thursday and friday.
+	What:
+
+	loop from 1 to (number of BD employees in ERP * 5)
+		find oldest lead in LMS with status either new, contacted or interested
+		update last update date to current sim date
+		if status is new then
+			25% of time change status to contacted and add a note to notes field with date and saying "contacted"
+			25% of time change status to interested and add a note to notes field using create_note
+			25% of time change status to not interested and add a note to notes field with date saying "not interested"
+			25% of time change status to schedule and add a note to notes field using create_note
+3) schedule_lead :  When : occurs when current sim date is monday, tuesday, wednesday, thursday and friday.
+	What: loop through all of the leads in LMS looking for leads with status set to schedule.  Transfer the customer name, address, phone, email and notes information into a new entry in the CRM.  Select a random employee in ERP whos department is Sales and add that name as salesperson in CRM.  set the meeting date in CRM as the current sim date plus a random number of days between 1 and 7.  Change the status in LMS and CRM to scheduled   
+	
+4) walk_ins : When : occurs every day
+	What : Add a random number between 0 and 3 of customer entries to the CRM.  Take the entries from the customer database with status as available and put the customer name, home postal address, phone number, email address in a new entry in CRM.  select a random employee in ERP whos department is Sales and add that name as salesperson in CRM. set the meeting date to the current simulation date, and set the status in CRM to scheduled.  change the status in customer database to walk in, and status in CRM 
+
+5) sales_meeting  : When : occurs every day
+	What : loop through all of the entries in the CRM looking for entries with status set to scheduled and the meeting date is equal to the current simulation date.
+		15% of the time time change status in CRM to no show and use create_note to create a note date stamped saying customer did not show up for meeting 
+		15% of the time change status to met and use create_note to create a note date stamped with notes about what customer thought of the car
+		15% of the time change status to waiting and use create_note to create a note date stamped with note saying customer is waiting to make decision.
+		30% of the time change status to no sale and use create_note to create a note date stamped with note saying why customer does not want to buy
+		25% of the time change status to in negotiation, select a car from the DMS that has status available, change status to in negotiation in DMS
+			calculate the sale price as the minimum sale price listed in DMS entry times random number between 1 and 1.25
+			copy make, model, year, VIN, new or used, sales price into the CRM entry for that customer
+			copy the date, sale price, customer name, address, phone, email into the DMS for that car
+	
+6) sales_followup : When : occurs every three days
+	What : loop through all of the entries in the CRM looking for entries with status set to met or waiting
+		60% of the time change status to waiting and use create_note to create a note date stamped with note saying customer is waiting to make decision.
+		20% of the time change status to no sale and use create_note to create a note date stamped with note saying why customer does not want to buy
+		20% of the time change status to in negotiation, select a car from the DMS that has status available, change status to in negotiation in DMS
+			calculate the sale price as the minimum sale price listed in DMS entry times random number between 1 and 1.25
+			copy make, model, year, VIN, new or used, sales price into the CRM entry for that customer
+			copy the date, sale price, customer name, address, phone, email into the DMS for that car
+
+
+7) new_cars : When : occurs every 5 days
+	What : Add a random number between 5-25 cars to the DMS system from the cars database and marked them as used in cars database and available in the DMS.  for each car add a debit transaction to the ERP for the cost of the car (minimum sales price).
+	
+8) finance_sales : When : occurs every day
+	What : loop through all entries in the CRM looking for entries with status in negotiation
+		Set the status to sold in the CRM for that entry.  Set the status to sold in DMS for that car
+		40% of the time it is a cash deal, create a credit transaction in the ERP for the full amount of sale price of the car
+		60% of the time it is a finance deal, create a credit transaction in the ERP for the down payment of the car which is the sale price * .20
+			create a new entry in LSS and enter the customer name, address, phone, email 
+				start date of loan is current simulation date, number of payments left is 36, loan payment amount is (sale price * .80) / 36
+				interest rate is random number between .03 and .11, down payment is sale price * .20, original sale price is sale price
+
+9) finance_payments When : first day of each month
+	What : loop through each entry in the LSS
+		if number of payments left is greater than 0 then
+			subtract 1 from the number of payments left
+			create a credit transaction in the ERP for the monthly loan payment calculated as the loan payment amount * (1 + interest rate)
+			
+10) payday ; When : Every Friday
+	What : loop through each employee in the ERP and create a debit transaction for their weekly salary
+
+
+I want to use this simulator to build AI agents for that will run in a parallel process.  write documentation such as a developer guide describing the             
+  databases and operation of the simulation, a guide for syncing two processes using the date and integration to run both processes either step by step or free     
+  running with a wait between each new day loop as well as any other information an agent developer may need         
+
+
+I've read through the full description carefully. Before planning, I have some clarifying questions, then I'll propose the implementation plan.                    
+  
+  Clarifying Questions                                                                                                                                               
+                 
+  Database & Infrastructure                                                   
+  
+  1. What database technology do you prefer? SQLite is simplest (single file), but since you mention running parallel programs that monitor the databases, PostgreSQL
+   offers better concurrent access. Or would you prefer SQLite with WAL mode as a middle ground?
+  2. Should all databases live in a single DB file/server, or separate files per database (e.g., lms.db, crm.db, etc.)?
+
+  LLM Integration
+  3. Which LLM provider for create_note? (Anthropic/Claude, OpenAI, other?) I'll need to know which API key to wire up.
+  4. Should there be a fallback for create_note if the LLM is unavailable or rate-limited (e.g., pre-written template notes)?
+
+  Business Logic Gaps
+  5. In lead_processing, the loop finds leads with status new, contacted, or interested, but the transition rules only describe what happens if status is new. What
+  should happen when status is contacted or interested? Should they have their own probability tables, or just re-apply the same 25/25/25/25 rules?
+  6. In finance_sales, when a car is sold, should the customer's status in the Customers simulation DB be updated to sold?
+  7. The EMS (employee management system) is defined with calendars and schedules but isn't referenced in any worker function explicitly. Should walk_ins and
+  schedule_lead also write to the EMS calendar? Or is EMS intended for external programs to read?
+  8. The sales_meeting description has 15+15+15+30+25 = 100% which works, but no_show is 15%. Should these percentages stay exactly as listed?
+
+  Parallel Operation
+  9. For external programs that "synchronize to the current simulation date" — what's the coordination mechanism? Options: (a) a shared simulation_state table in the
+   DB they can poll, (b) a simple file on disk, (c) a lightweight REST/socket API the simulation exposes?
+  10. When the simulation is in step mode and paused, should external programs also pause, or continue processing independently?
+
+  Output & UX
+  11. What level of console output during simulation? Options: (a) minimal (date + summary per day), (b) verbose (each worker action logged), (c) a live terminal
+  dashboard (using rich)?
+  12. Should there be an end-of-simulation report summarizing total results?
+
+  Cars Data
+  13. For car make/model/year — should I use a realistic list of real makes/models (Honda, Toyota, Ford, etc.) or fully synthetic faker data?
+
+ 
+
+  CLI Interface
+
+  python main.py --start-date 2025-01-01 --days 90 --step-mode
+  python main.py --days 30 --disable-workers lead_processing,payday
+  python main.py --days 30 --disable-all-workers  # external scripts only
+  python main.py --reset  # wipe and re-initialize databases
+
+  Suggested Enhancements Beyond Spec
+
+  1. Simulation State Table — a simulation_state DB table that external programs can poll for current sim date, paused status, and last completed worker. This is the
+   coordination mechanism for parallel programs.
+  2. Event Log Table — append-only log of every action taken (worker name, entity affected, old/new status, sim date). External programs can tail this to react to
+  events without polling every table.
+  3. Random Seed Support (--seed 42) — reproducible simulations for testing and debugging.
+  4. LLM Note Caching — cache generated notes by customer context hash to reduce API calls and cost during large simulations.
+  5. Worker Hooks — before/after each worker runs, check for a workers/hooks/ directory for external scripts to inject behavior (extends the "disabled worker"
+  concept into a plugin system).
+  6. Template Fallback for Notes — if LLM is unavailable, fall back to a library of 20-30 pre-written realistic note templates so the simulation never blocks.
+  7. Daily Results Snapshot — at end of each sim day, write a complete snapshot row to the Results DB so you can graph metrics over time.
+  8. Configurable Probabilities — put the 25/25/25/25 and 15/15/15/30/25 percentages in config.py as named constants so they're easy to tune without touching worker
+  code.
+  9. Rich Live Dashboard (optional flag --dashboard) — shows a live table of current LMS/CRM/DMS counts, today's transactions, and worker status as each day
+  processes.
+
+
